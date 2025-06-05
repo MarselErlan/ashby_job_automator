@@ -13,12 +13,10 @@ from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
-from langchain.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional
 from src.app.core.config import settings
 import logging
-import json
 from sqlalchemy.sql import text
 
 logging.basicConfig(level=logging.INFO)
@@ -41,7 +39,7 @@ class FormField(BaseModel):
 class FormFields(BaseModel):
     fields: Dict[str, FormField] = Field(description="Dictionary of field names and their properties")
 
-# Initialize LangChain chat model with structured output
+# Initialize LangChain chat model
 chat_model = ChatOpenAI(
     model="gpt-4o-mini",
     temperature=0.7,
@@ -61,9 +59,9 @@ async def extract_fields(request: ExtractRequest, db: Session = Depends(get_db_s
     logger.info(f"Processing job URL: {job_url}")
     driver = None
     try:
-        # Set up Selenium with non-headless browser
+        # Set up Selenium with headless browser
         chrome_options = Options()
-        chrome_options.headless = True  # Headless for extraction to save resources
+        chrome_options.headless = True  # Headless for extraction
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         service = Service(ChromeDriverManager().install())
@@ -72,13 +70,15 @@ async def extract_fields(request: ExtractRequest, db: Session = Depends(get_db_s
         # Open the job application page
         driver.get(job_url)
 
-        # Wait for the form or a form-like element to be visible
+        # Wait for any input field to ensure the form is loaded
         try:
-            WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.TAG_NAME, "form"))
+            WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "input, textarea, select"))
             )
         except Exception as e:
-            logger.warning(f"Standard form tag not found, attempting to find form-like structure: {str(e)}")
+            logger.warning(f"Form fields not found after waiting: {str(e)}")
+            # Log the page source for debugging
+            logger.debug(f"Page source snippet: {driver.page_source[:1000]}...")
 
         # Get the page source after JavaScript rendering
         html_content = driver.page_source
@@ -88,10 +88,17 @@ async def extract_fields(request: ExtractRequest, db: Session = Depends(get_db_s
         # Try finding a standard <form> tag first
         form = soup.find("form")
         if not form:
-            # Fallback: Look for a div or section with form-like elements (inputs, etc.)
-            form = soup.find(lambda tag: tag.name in ["div", "section"] and tag.find_all(["input", "textarea", "select"]))
+            # Fallback: Look for a container with form-like elements
+            logger.info("Standard form tag not found, searching for form-like structure")
+            form = soup.find(lambda tag: tag.name in ["div", "section", "main"] and tag.find_all(["input", "textarea", "select"]))
             if not form:
-                raise HTTPException(status_code=400, detail="No form or form-like structure found on the page")
+                # Last resort: Look for any container with multiple inputs
+                form = soup.find(lambda tag: tag.name in ["div", "section", "main"] and len(tag.find_all(["input", "textarea", "select"])) > 1)
+                if not form:
+                    raise HTTPException(status_code=400, detail="No form or form-like structure found on the page")
+
+        # Log the found form structure for debugging
+        logger.debug(f"Found form structure snippet: {str(form)[:500]}...")
 
         fields = {}
         # Map input IDs to labels
@@ -125,20 +132,9 @@ async def extract_fields(request: ExtractRequest, db: Session = Depends(get_db_s
         if not fields:
             raise HTTPException(status_code=400, detail="No form fields found on the page")
 
-        # Use LangChain to refine field extraction
-        parser = PydanticOutputParser(pydantic_object=FormFields)
-        prompt_template = ChatPromptTemplate.from_messages([
-            ("system", "You are a web scraping assistant. Extract form fields from the given HTML and return them as a structured JSON object matching the schema provided. Ensure all required fields are identified accurately."),
-            ("user", "HTML: {html}\nSchema: {schema}\nExtract all form fields with their names, types, required status, placeholders, labels, and options (for select fields).")
-        ])
-        prompt = prompt_template.format_messages(
-            html=str(form),
-            schema=parser.get_format_instructions()
-        )
-        refined_fields = chat_model.with_structured_output(FormFields).invoke(prompt)
-
-        # Use refined fields if successful, otherwise fall back
-        refined_fields_dict = refined_fields.fields if refined_fields else fields
+        # Optional LangChain refinement (disabled due to parsing issues)
+        # For now, rely on BeautifulSoup extraction
+        refined_fields_dict = fields
 
         # Save to database
         db_fields = ExtractedFieldsModel(job_url=job_url, fields=refined_fields_dict)
@@ -166,7 +162,6 @@ async def extract_fields(request: ExtractRequest, db: Session = Depends(get_db_s
 @router.get("/health")
 async def check_db_connection(db: Session = Depends(get_db_session)):
     try:
-        # Use text() to handle raw SQL query
         result = db.execute(text("SELECT COUNT(*) FROM extracted_fields")).scalar()
         return {"status": "success", "message": f"Database connected. Found {result} records in extracted_fields table."}
     except Exception as e:
