@@ -20,7 +20,7 @@ router = APIRouter()
 @router.post("/fill")
 async def fill_form(
     request: FillFormRequest,
-    close_browser: bool = Query(False, description="Whether to close the browser after filling the form")
+    # close_browser: bool = Query(False, description="Whether to close the browser after filling the form")
 ):
     driver = None
     try:
@@ -141,7 +141,7 @@ async def fill_form(
         if dummy_profile.get("resume") and os.path.exists(dummy_profile["resume"]):
             os.remove(dummy_profile["resume"])
         # Close the browser if requested
-        if close_browser and driver:
-            driver.quit()
+        # if close_browser and driver:
+        #     driver.quit()
         elif driver:
             logger.info("Browser left open for inspection")

@@ -167,3 +167,22 @@ async def check_db_connection(db: Session = Depends(get_db_session)):
     except Exception as e:
         logger.error(f"Database connection failed: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to connect to the database")
+
+@router.get("/records", response_model=List[ExtractedFields])
+async def get_extracted_records(db: Session = Depends(get_db_session)):
+    try:
+        records = db.query(ExtractedFieldsModel).all()
+        if not records:
+            return []
+        return [
+            ExtractedFields(
+                id=record.id,
+                job_url=record.job_url,
+                fields=record.fields,
+                created_at=record.created_at
+            )
+            for record in records
+        ]
+    except Exception as e:
+        logger.error(f"Error retrieving records: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving records: {str(e)}")
